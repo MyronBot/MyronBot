@@ -855,6 +855,14 @@ fn mac_target_label() -> Result<String> {
     Ok(format!("gui/{uid}/{MAC_LABEL}"))
 }
 
+fn format_macos_launchagents_permission_hint(path: &Path) -> String {
+    format!(
+        "Permission denied while writing {}. Check ownership/permissions of ~/Library/LaunchAgents (and existing {}), then retry without sudo.",
+        path.display(),
+        path.file_name().and_then(|v| v.to_str()).unwrap_or("plist")
+    )
+}
+
 fn install_macos(ctx: &ServiceContext, opts: &InstallOptions) -> Result<()> {
     assert_command_exists("launchctl")?;
 
@@ -870,13 +878,23 @@ fn install_macos(ctx: &ServiceContext, opts: &InstallOptions) -> Result<()> {
     let launch_agents = plist_path
         .parent()
         .ok_or_else(|| anyhow!("Invalid plist path"))?;
-    std::fs::create_dir_all(launch_agents)
-        .with_context(|| format!("Failed to create {}", launch_agents.display()))?;
+    std::fs::create_dir_all(launch_agents).map_err(|e| {
+        if e.kind() == ErrorKind::PermissionDenied {
+            anyhow!(format_macos_launchagents_permission_hint(&plist_path))
+        } else {
+            anyhow!("Failed to create {}: {}", launch_agents.display(), e)
+        }
+    })?;
     std::fs::create_dir_all(&ctx.runtime_logs_dir)
         .with_context(|| format!("Failed to create {}", ctx.runtime_logs_dir.display()))?;
 
-    std::fs::write(&plist_path, render_macos_plist(ctx))
-        .with_context(|| format!("Failed to write {}", plist_path.display()))?;
+    std::fs::write(&plist_path, render_macos_plist(ctx)).map_err(|e| {
+        if e.kind() == ErrorKind::PermissionDenied {
+            anyhow!(format_macos_launchagents_permission_hint(&plist_path))
+        } else {
+            anyhow!("Failed to write {}: {}", plist_path.display(), e)
+        }
+    })?;
 
     let _ = stop_macos();
     start_macos()?;
@@ -1098,7 +1116,7 @@ fn status_macos(ctx: &ServiceContext, opts: &StatusOptions) -> Result<()> {
     let running = runtime
         .state
         .as_ref()
-        .map(|s| s.eq_ignore_ascii_case("running"))
+        .map(|s| s.eq_ignore_ascii_case("running") || s.eq_ignore_ascii_case("active"))
         .unwrap_or(false)
         || runtime.pid.unwrap_or(0) > 0;
 
@@ -1244,6 +1262,27 @@ mod tests {
         assert_eq!(status.pid, Some(99));
         assert_eq!(status.last_exit_status, Some(0));
         assert_eq!(status.last_exit_reason.as_deref(), Some("exited"));
+    }
+
+    #[test]
+    fn test_macos_active_state_is_treated_as_running() {
+        let runtime = parse_macos_runtime_status("state = active\npid = 0\n");
+        let running = runtime
+            .state
+            .as_ref()
+            .map(|s| s.eq_ignore_ascii_case("running") || s.eq_ignore_ascii_case("active"))
+            .unwrap_or(false)
+            || runtime.pid.unwrap_or(0) > 0;
+        assert!(running);
+    }
+
+    #[test]
+    fn test_format_macos_launchagents_permission_hint_contains_target_path() {
+        let p = Path::new("/Users/u/Library/LaunchAgents/ai.microclaw.gateway.plist");
+        let msg = format_macos_launchagents_permission_hint(p);
+        assert!(msg.contains("Permission denied"));
+        assert!(msg.contains("LaunchAgents"));
+        assert!(msg.contains("ai.microclaw.gateway.plist"));
     }
 
     #[test]
