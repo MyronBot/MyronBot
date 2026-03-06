@@ -48,7 +48,7 @@ sync_rebase_and_push() {
 wait_for_ci_success() {
   local github_repo="$1"
   local commit_sha="$2"
-  local timeout_seconds="${CI_WAIT_TIMEOUT_SECONDS:-1800}"
+  local timeout_seconds="${CI_WAIT_TIMEOUT_SECONDS:-3000}"
   local interval_seconds="${CI_WAIT_INTERVAL_SECONDS:-20}"
   local elapsed=0
 
