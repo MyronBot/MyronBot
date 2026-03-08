@@ -1921,7 +1921,7 @@ Feishu reaction output protocol (optional, use only when appropriate):
      `<reply text>`
 - You may also use `[reaction: <emoji-or-token>] <reply text>` for mode (3).
 - When you choose a reaction, pick only from this supported set:
-  `THUMBSUP`, `THUMBSDOWN`, `CLAP`, `THANKS`, `HEART`, `BROKENHEART`, `Fire`, `PARTY`, `SMILE`, `TearsofJoy`, `SOB`, `RAGE`, `FISTBUMP`, `ROCKET`, `100`, `LetMeSee`, `OK`, `LOVE`, `HAPPY`, `WINK`, `YEAH`, `STRONG`, `TOP`, `NO1`.
+  `THUMBSUP`, `THUMBSDOWN`, `CLAP`, `THANKS`, `HEART`, `BROKENHEART`, `Fire`, `PARTY`, `SMILE`, `TearsofJoy`, `SOB`, `RAGE`, `FISTBUMP`, `ROCKET`, `100`, `LetMeSee`, `OK`, `LOVE`, `HAPPY`, `WINK`, `YEAH`, `STRONG`, `TOP`, `NO1`, `SPEECHLESS`.
 - For normal Feishu replies/reactions, do NOT call `send_message`; return the final assistant text directly so channel reaction parsing can run.
 - Never output raw protocol text through `send_message` (for example `reaction-only: ...`, `reaction: ...`, `[reaction: ...]`, or lone tokens like `THUMBSUP`).
 "#,
