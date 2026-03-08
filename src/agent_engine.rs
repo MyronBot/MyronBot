@@ -754,7 +754,6 @@ pub(crate) async fn process_with_agent_impl(
     let mut seen_failed_tool_details: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     let mut empty_visible_reply_retry_attempted = false;
-    let mut mojibake_retry_attempted = false;
     let (effective_profile, effective_model) =
         resolve_effective_provider_and_model(state, context.caller_channel).await;
     let scoped_provider = if effective_profile.alias != state.config.llm_provider {
@@ -925,7 +924,8 @@ pub(crate) async fn process_with_agent_impl(
             } else {
                 visible_text.clone()
             };
-            if visible_text.trim().is_empty() && !empty_visible_reply_retry_attempted {
+            let has_displayable_output = !display_text.trim().is_empty();
+            if !has_displayable_output && !empty_visible_reply_retry_attempted {
                 empty_visible_reply_retry_attempted = true;
                 warn!(
                     "Empty visible model reply; injecting runtime guard and retrying once (chat_id={})",
@@ -944,25 +944,6 @@ pub(crate) async fn process_with_agent_impl(
                 });
                 continue;
             }
-            if visible_text.contains('\u{FFFD}') && !mojibake_retry_attempted {
-                mojibake_retry_attempted = true;
-                warn!(
-                    "Model reply contains replacement characters; injecting runtime guard and retrying once (chat_id={})",
-                    chat_id
-                );
-                messages.push(Message {
-                    role: "assistant".into(),
-                    content: MessageContent::Text(text.clone()),
-                });
-                messages.push(Message {
-                    role: "user".into(),
-                    content: MessageContent::Text(
-                        "[runtime_guard]: Your previous reply contained garbled replacement characters (�). Reply again now with clean, readable UTF-8 text only. Keep the same meaning and preserve any reaction directive."
-                            .to_string(),
-                    ),
-                });
-                continue;
-            }
 
             // Add final assistant message and save session (keep full text including thinking)
             messages.push(Message {
@@ -972,7 +953,7 @@ pub(crate) async fn process_with_agent_impl(
             persist_session_with_skill_env_files(state, chat_id, &mut messages, &skill_env_files)
                 .await;
 
-            let final_text = if visible_text.trim().is_empty() {
+            let final_text = if display_text.trim().is_empty() {
                 if stop_reason == "max_tokens" {
                     "I reached the model output limit before producing a visible reply. Please ask me to continue."
                         .to_string()
