@@ -95,7 +95,6 @@ Automated path from the MicroClaw repo:
 ```sh
 scripts/update-nixpkgs.sh
 ```
-
 ## Validation Before Opening Nixpkgs PR
 
 - Build on Linux and Darwin (`x86_64-linux`, `aarch64-darwin` at minimum).

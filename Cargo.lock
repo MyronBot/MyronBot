@@ -2647,7 +2647,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "microclaw"
-version = "0.0.165"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2701,7 +2701,7 @@ dependencies = [
 
 [[package]]
 name = "microclaw-app"
-version = "0.0.80"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2718,7 +2718,7 @@ dependencies = [
 
 [[package]]
 name = "microclaw-channels"
-version = "0.0.80"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2729,7 +2729,7 @@ dependencies = [
 
 [[package]]
 name = "microclaw-clawhub"
-version = "0.0.80"
+version = "0.1.0"
 dependencies = [
  "chrono",
  "microclaw-core",
@@ -2743,7 +2743,7 @@ dependencies = [
 
 [[package]]
 name = "microclaw-core"
-version = "0.0.80"
+version = "0.1.0"
 dependencies = [
  "reqwest 0.12.28",
  "rusqlite",
@@ -2754,7 +2754,7 @@ dependencies = [
 
 [[package]]
 name = "microclaw-storage"
-version = "0.0.80"
+version = "0.1.0"
 dependencies = [
  "chrono",
  "microclaw-core",
@@ -2767,7 +2767,7 @@ dependencies = [
 
 [[package]]
 name = "microclaw-tools"
-version = "0.0.80"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
