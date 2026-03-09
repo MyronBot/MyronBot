@@ -3592,6 +3592,122 @@ impl SetupApp {
         }
     }
 
+    fn field_guidance(key: &str) -> (&'static str, &'static str) {
+        match key {
+            "LLM_PROVIDER" => (
+                "Select the LLM backend. Presets auto-fill a sensible model/base URL.",
+                "Example: openai, anthropic, deepseek, custom",
+            ),
+            "LLM_API_KEY" => (
+                "API key for the selected provider. Leave empty only for providers that allow it.",
+                "Example: sk-xxxx",
+            ),
+            "LLM_MODEL" => (
+                "Default model used when no per-channel override is set.",
+                "Example: qwen3.5-plus",
+            ),
+            "LLM_BASE_URL" => (
+                "Custom OpenAI-compatible endpoint root. Use provider default if empty.",
+                "Example: https://dashscope.aliyuncs.com/compatible-mode/v1",
+            ),
+            "LLM_USER_AGENT" => (
+                "HTTP User-Agent for LLM requests. Empty means automatic MicroClaw/<version>.",
+                "Example: OpenClaw/0.1.0",
+            ),
+            "SHOW_THINKING" => (
+                "Show model reasoning/thinking text in channel output when provider supports it.",
+                "Example: true or false",
+            ),
+            "ENABLED_CHANNELS" => (
+                "Comma-separated channel names to enable now. You can configure more later.",
+                "Example: web,feishu,telegram",
+            ),
+            "DATA_DIR" => (
+                "Root directory for runtime data (DB, sessions, memory, skills).",
+                "Example: ./microclaw.data",
+            ),
+            "WORKING_DIR" => (
+                "Filesystem base path for tools like read/write/bash/glob.",
+                "Example: ./tmp",
+            ),
+            "OVERRIDE_TIMEZONE" => (
+                "Optional IANA timezone override for scheduling. Empty uses system timezone.",
+                "Example: Asia/Shanghai",
+            ),
+            "SOULS_DIR" => (
+                "Directory storing SOUL.md personalities. Empty uses <data_dir>/souls.",
+                "Example: ./microclaw.data/souls",
+            ),
+            "REFLECTOR_ENABLED" => (
+                "Enable periodic memory reflection that extracts structured memories from chat.",
+                "Example: true or false",
+            ),
+            "REFLECTOR_INTERVAL_MINS" => ("How often memory reflection runs.", "Example: 15"),
+            "MEMORY_TOKEN_BUDGET" => (
+                "Approximate token budget for injected memories in the system prompt.",
+                "Example: 1500",
+            ),
+            "EMBEDDING_PROVIDER" => (
+                "Provider for memory embeddings (semantic retrieval). Optional feature.",
+                "Example: openai or ollama",
+            ),
+            "EMBEDDING_API_KEY" => (
+                "API key for embedding provider, if required.",
+                "Example: sk-xxxx",
+            ),
+            "EMBEDDING_BASE_URL" => (
+                "Custom endpoint for embedding provider.",
+                "Example: https://api.openai.com/v1",
+            ),
+            "EMBEDDING_MODEL" => (
+                "Embedding model name for memory vectors.",
+                "Example: text-embedding-3-small",
+            ),
+            "EMBEDDING_DIM" => ("Embedding vector dimension.", "Example: 1536"),
+            "SANDBOX_ENABLED" => (
+                "Enable sandbox mode for tool execution isolation.",
+                "Example: true or false",
+            ),
+            "HIGH_RISK_TOOL_USER_CONFIRMATION_REQUIRED" => (
+                "Require explicit confirmation before running high-risk tools.",
+                "Example: true or false",
+            ),
+            _ if key.ends_with("_BOT_TOKEN") => (
+                "Bot token for this channel account.",
+                "Example: 123456:ABCDEF...",
+            ),
+            _ if key.ends_with("_MODEL") => (
+                "Per-channel/per-account model override.",
+                "Example: qwen3.5-plus",
+            ),
+            _ if key.ends_with("_LLM_PROVIDER") => (
+                "Per-channel/per-account LLM provider override.",
+                "Example: openai",
+            ),
+            _ if key.ends_with("_LLM_API_KEY") => (
+                "Per-channel/per-account API key override.",
+                "Example: sk-xxxx",
+            ),
+            _ if key.ends_with("_LLM_BASE_URL") => (
+                "Per-channel/per-account base URL override.",
+                "Example: https://dashscope.aliyuncs.com/compatible-mode/v1",
+            ),
+            _ if key.ends_with("_ALLOWED_USER_IDS") => (
+                "Allowed user IDs for this bot/account.",
+                "Example: 12345,67890",
+            ),
+            _ if key.ends_with("_SOUL_PATH") => (
+                "SOUL.md filename/path used by this bot/account.",
+                "Example: souls/soul-zhang.md",
+            ),
+            _ if key.starts_with("DYN_") => (
+                "Dynamic channel field loaded from channel setup definition.",
+                "Example: fill with your channel-specific credential/config value",
+            ),
+            _ => ("Configuration value used by setup/runtime.", ""),
+        }
+    }
+
     fn field_display_order(key: &str) -> usize {
         const ORDER_MODEL_BASE: usize = 0;
         const ORDER_CHANNEL_BASE: usize = 100;
@@ -4873,7 +4989,8 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &SetupApp) {
     frame.render_widget(body, left_inner);
 
     let field = app.selected_field();
-    let help = Paragraph::new(vec![
+    let (field_desc, field_example) = SetupApp::field_guidance(&field.key);
+    let mut help_lines = vec![
         Line::from(vec![
             Span::styled("Key: ", Style::default().fg(Color::DarkGray)),
             Span::styled(field.key.clone(), Style::default().fg(Color::Magenta)),
@@ -4890,6 +5007,19 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &SetupApp) {
             Span::styled("Editing: ", Style::default().fg(Color::DarkGray)),
             Span::raw(if app.editing { "active" } else { "idle" }),
         ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("What: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(field_desc),
+        ]),
+    ];
+    if !field_example.is_empty() {
+        help_lines.push(Line::from(vec![
+            Span::styled("Example: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(field_example, Style::default().fg(Color::LightGreen)),
+        ]));
+    }
+    help_lines.extend([
         Line::from(""),
         Line::from(Span::styled(
             "Tips",
@@ -4912,13 +5042,14 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &SetupApp) {
         Line::from("• F2: validate + online checks"),
         Line::from("• s: save with online validation"),
         Line::from("• Ctrl+S / Ctrl+Shift+S: save without online model validation"),
-    ])
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Details / Help"),
-    )
-    .wrap(Wrap { trim: false });
+    ]);
+    let help = Paragraph::new(help_lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Details / Help"),
+        )
+        .wrap(Wrap { trim: false });
     frame.render_widget(help, body_chunks[1].inner(Margin::new(1, 0)));
 
     let (status_icon, status_color) =
