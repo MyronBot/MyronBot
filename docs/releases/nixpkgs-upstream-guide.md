@@ -90,6 +90,12 @@ nix build .#microclaw
 4. Copy the "got: sha256-..." values from the error output into `hash` and `cargoHash`.
 5. Rebuild until it succeeds.
 
+Automated path from the MicroClaw repo:
+
+```sh
+scripts/update-nixpkgs.sh
+```
+
 ## Validation Before Opening Nixpkgs PR
 
 - Build on Linux and Darwin (`x86_64-linux`, `aarch64-darwin` at minimum).
