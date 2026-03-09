@@ -5020,7 +5020,11 @@ fn draw_ui(frame: &mut ratatui::Frame<'_>, app: &SetupApp) {
         ]));
     }
     if !is_required {
-        let default_value = app.default_value_for_field(&field.key);
+        let default_value = if field.key == "LLM_USER_AGENT" {
+            crate::http_client::default_llm_user_agent()
+        } else {
+            app.default_value_for_field(&field.key)
+        };
         let default_display = if default_value.trim().is_empty() {
             "(empty)".to_string()
         } else {
