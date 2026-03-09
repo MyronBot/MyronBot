@@ -2392,6 +2392,29 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_telegram_external_chat_id_plain_chat() {
+        let (chat_id, thread_id) =
+            TelegramAdapter::parse_telegram_external_chat_id("-100123").unwrap();
+        assert_eq!(chat_id, ChatId(-100123));
+        assert_eq!(thread_id, None);
+    }
+
+    #[test]
+    fn test_parse_telegram_external_chat_id_topic_chat() {
+        let (chat_id, thread_id) =
+            TelegramAdapter::parse_telegram_external_chat_id("-100123:456").unwrap();
+        assert_eq!(chat_id, ChatId(-100123));
+        assert_eq!(thread_id, Some(ThreadId(MessageId(456))));
+    }
+
+    #[test]
+    fn test_parse_telegram_external_chat_id_invalid_values() {
+        assert!(TelegramAdapter::parse_telegram_external_chat_id("abc").is_err());
+        assert!(TelegramAdapter::parse_telegram_external_chat_id("-100123:bad").is_err());
+        assert!(TelegramAdapter::parse_telegram_external_chat_id("-100123:456:789").is_err());
+    }
+
+    #[test]
     fn test_check_private_chat_access() {
         let allowed_ids = vec![123, 456];
 
