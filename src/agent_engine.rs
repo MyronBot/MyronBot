@@ -4,8 +4,8 @@ use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
 use crate::config::ResolvedLlmProviderProfile;
-use crate::embedding::EmbeddingProvider;
 use crate::hooks::HookOutcome;
+use crate::memory_service::{build_db_memory_context, maybe_handle_explicit_memory_command};
 use crate::run_control;
 use crate::runtime::AppState;
 use crate::tools::ToolAuthContext;
@@ -13,8 +13,7 @@ use microclaw_core::llm_types::{
     ContentBlock, ImageSource, Message, MessageContent, ResponseContentBlock,
 };
 use microclaw_core::text::floor_char_boundary;
-use microclaw_storage::db::{call_blocking, Database, StoredMessage};
-use microclaw_storage::memory_quality;
+use microclaw_storage::db::{call_blocking, StoredMessage};
 
 #[derive(Debug, Clone, Copy)]
 pub struct AgentRequestContext<'a> {
@@ -366,7 +365,7 @@ fn is_explicit_user_approval(text: &str) -> bool {
     approval_markers.iter().any(|m| normalized.contains(m))
 }
 
-fn is_slash_command_text(text: &str) -> bool {
+pub(crate) fn is_slash_command_text(text: &str) -> bool {
     text.trim_start().starts_with('/')
 }
 
@@ -432,135 +431,6 @@ fn strip_slash_command_user_lines(messages: &mut Vec<Message>) {
         }
     }
     *messages = filtered;
-}
-
-fn jaccard_similarity_ratio(a: &str, b: &str) -> f64 {
-    use std::collections::HashSet;
-    let a_words: HashSet<&str> = a.split_whitespace().collect();
-    let b_words: HashSet<&str> = b.split_whitespace().collect();
-    let intersection = a_words.intersection(&b_words).count();
-    let union = a_words.len() + b_words.len() - intersection;
-    if union == 0 {
-        1.0
-    } else {
-        intersection as f64 / union as f64
-    }
-}
-
-async fn maybe_handle_explicit_memory_command(
-    state: &AppState,
-    chat_id: i64,
-    override_prompt: Option<&str>,
-    image_data: Option<(String, String)>,
-) -> anyhow::Result<Option<String>> {
-    if override_prompt.is_some() || image_data.is_some() {
-        return Ok(None);
-    }
-
-    let latest_user = call_blocking(state.db.clone(), move |db| {
-        db.get_recent_messages(chat_id, 10)
-    })
-    .await?;
-    let Some(last_user_text) = latest_user
-        .into_iter()
-        .rev()
-        .find(|m| !m.is_from_bot && !is_slash_command_text(&m.content))
-        .map(|m| m.content)
-    else {
-        return Ok(None);
-    };
-
-    let Some(explicit_content) = memory_quality::extract_explicit_memory_command(&last_user_text)
-    else {
-        return Ok(None);
-    };
-    if !memory_quality::memory_quality_ok(&explicit_content) {
-        return Ok(Some(
-            "I skipped saving that memory because it looked too vague. Please send a specific fact.".to_string(),
-        ));
-    }
-
-    let existing = state
-        .memory_backend
-        .get_all_memories_for_chat(Some(chat_id))
-        .await?;
-    let explicit_topic = memory_quality::memory_topic_key(&explicit_content);
-    if let Some(dup) = existing.iter().find(|m| {
-        !m.is_archived
-            && (m.content.eq_ignore_ascii_case(&explicit_content)
-                || jaccard_similarity_ratio(&m.content, &explicit_content) >= 0.55)
-    }) {
-        let memory_id = dup.id;
-        let content_for_update = explicit_content.clone();
-        let _ = state
-            .memory_backend
-            .update_memory_with_metadata(
-                memory_id,
-                &content_for_update,
-                "KNOWLEDGE",
-                0.95,
-                "explicit",
-            )
-            .await;
-        return Ok(Some(format!(
-            "Noted. Updated memory #{memory_id}: {explicit_content}"
-        )));
-    }
-
-    if let Some(conflict) = existing.iter().find(|m| {
-        !m.is_archived
-            && m.category == "KNOWLEDGE"
-            && memory_quality::memory_topic_key(&m.content) == explicit_topic
-            && !m.content.eq_ignore_ascii_case(&explicit_content)
-    }) {
-        let from_id = conflict.id;
-        let new_content = explicit_content.clone();
-        let superseded_id = state
-            .memory_backend
-            .supersede_memory(
-                from_id,
-                &new_content,
-                "KNOWLEDGE",
-                "explicit_conflict",
-                0.95,
-                Some("explicit_topic_conflict"),
-            )
-            .await?;
-        return Ok(Some(format!(
-            "Noted. Superseded memory #{from_id} with #{superseded_id}: {explicit_content}"
-        )));
-    }
-
-    let content_for_insert = explicit_content.clone();
-    let inserted_id = state
-        .memory_backend
-        .insert_memory_with_metadata(
-            Some(chat_id),
-            &content_for_insert,
-            "KNOWLEDGE",
-            "explicit",
-            0.95,
-        )
-        .await?;
-
-    #[cfg(feature = "sqlite-vec")]
-    {
-        if let Some(provider) = &state.embedding {
-            if let Ok(embedding) = provider.embed(&explicit_content).await {
-                let provider_model = provider.model().to_string();
-                let _ = call_blocking(state.db.clone(), move |db| {
-                    db.upsert_memory_vec(inserted_id, &embedding)?;
-                    db.update_memory_embedding_model(inserted_id, &provider_model)?;
-                    Ok(())
-                })
-                .await;
-            }
-        }
-    }
-
-    Ok(Some(format!(
-        "Noted. Saved memory #{inserted_id}: {explicit_content}"
-    )))
 }
 
 pub(crate) async fn process_with_agent_impl(
@@ -694,7 +564,7 @@ pub(crate) async fn process_with_agent_impl(
     let db_memory = build_db_memory_context(
         &state.memory_backend,
         &state.db,
-        &state.embedding,
+        state.embedding.as_ref(),
         chat_id,
         &query,
         state.config.memory_token_budget,
@@ -1583,185 +1453,6 @@ pub(crate) async fn load_messages_from_db(
     }
     let bot_username = state.config.bot_username_for_channel(caller_channel);
     Ok(history_to_claude_messages(&filtered, &bot_username))
-}
-
-fn is_cjk(c: char) -> bool {
-    matches!(
-        c as u32,
-        0x4E00..=0x9FFF
-            | 0x3400..=0x4DBF
-            | 0x20000..=0x2A6DF
-            | 0x2A700..=0x2B73F
-            | 0x2B740..=0x2B81F
-            | 0x2B820..=0x2CEAF
-            | 0xF900..=0xFAFF
-    )
-}
-
-fn tokenize_for_relevance(text: &str) -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
-
-    for token in text
-        .split_whitespace()
-        .map(|w| {
-            w.chars()
-                .filter(|c| c.is_alphanumeric())
-                .collect::<String>()
-                .to_lowercase()
-        })
-        .filter(|w| w.len() > 1)
-    {
-        out.insert(token);
-    }
-
-    let cjk_chars: Vec<char> = text.chars().filter(|c| is_cjk(*c)).collect();
-    if cjk_chars.len() >= 2 {
-        for pair in cjk_chars.windows(2) {
-            let gram: String = pair.iter().collect();
-            out.insert(gram);
-        }
-    } else if cjk_chars.len() == 1 {
-        out.insert(cjk_chars[0].to_string());
-    }
-
-    out
-}
-
-fn score_relevance_with_cache(
-    content: &str,
-    query_tokens: &std::collections::HashSet<String>,
-) -> usize {
-    if query_tokens.is_empty() {
-        return 0;
-    }
-    let content_tokens = tokenize_for_relevance(content);
-    content_tokens
-        .iter()
-        .filter(|t| query_tokens.contains(*t))
-        .count()
-}
-
-pub(crate) async fn build_db_memory_context(
-    memory_backend: &std::sync::Arc<crate::memory_backend::MemoryBackend>,
-    db: &std::sync::Arc<Database>,
-    embedding: &Option<std::sync::Arc<dyn EmbeddingProvider>>,
-    chat_id: i64,
-    query: &str,
-    token_budget: usize,
-) -> String {
-    let memories = match memory_backend.get_memories_for_context(chat_id, 100).await {
-        Ok(m) => m,
-        Err(_) => return String::new(),
-    };
-
-    if memories.is_empty() {
-        return String::new();
-    }
-
-    let mut ordered: Vec<&microclaw_storage::db::Memory> = Vec::new();
-    #[cfg(feature = "sqlite-vec")]
-    let mut retrieval_method = "keyword";
-    #[cfg(not(feature = "sqlite-vec"))]
-    let retrieval_method = "keyword";
-
-    #[cfg(feature = "sqlite-vec")]
-    {
-        if let Some(provider) = embedding {
-            if memory_backend.prefers_mcp() {
-                // memory backend is external; local sqlite-vec cannot rank remote rows reliably.
-            } else if !query.trim().is_empty() {
-                if let Ok(query_vec) = provider.embed(query).await {
-                    let knn_result = call_blocking(db.clone(), move |db| {
-                        db.knn_memories(chat_id, &query_vec, 20)
-                    })
-                    .await;
-                    if let Ok(knn_rows) = knn_result {
-                        let by_id: std::collections::HashMap<i64, &microclaw_storage::db::Memory> =
-                            memories.iter().map(|m| (m.id, m)).collect();
-                        for (id, _) in knn_rows {
-                            if let Some(mem) = by_id.get(&id) {
-                                ordered.push(*mem);
-                            }
-                        }
-                        if !ordered.is_empty() {
-                            retrieval_method = "knn";
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(not(feature = "sqlite-vec"))]
-    {
-        let _ = embedding;
-    }
-
-    if ordered.is_empty() {
-        // Score by relevance to current query; preserve recency for ties.
-        let query_tokens = tokenize_for_relevance(query);
-        let mut scored: Vec<(usize, usize, &microclaw_storage::db::Memory)> = memories
-            .iter()
-            .enumerate()
-            .map(|(idx, m)| {
-                (
-                    score_relevance_with_cache(&m.content, &query_tokens),
-                    idx,
-                    m,
-                )
-            })
-            .collect();
-        if !query.is_empty() {
-            scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        }
-        ordered = scored.into_iter().map(|(_, _, m)| m).collect();
-    }
-
-    let mut out = String::from("<structured_memories>\n");
-    let mut used_tokens = 0usize;
-    let mut omitted = 0usize;
-
-    let budget = token_budget.max(1);
-
-    for (idx, m) in ordered.iter().enumerate() {
-        let estimated_tokens = (m.content.len() / 4) + 10;
-        if used_tokens + estimated_tokens > budget {
-            omitted = ordered.len().saturating_sub(idx);
-            break;
-        }
-
-        used_tokens += estimated_tokens;
-        let scope = if m.chat_id.is_none() {
-            "global"
-        } else {
-            "chat"
-        };
-        out.push_str(&format!("[{}] [{}] {}\n", m.category, scope, m.content));
-    }
-    if omitted > 0 {
-        out.push_str(&format!("(+{omitted} memories omitted)\n"));
-    }
-    out.push_str("</structured_memories>\n");
-    let candidate_count = ordered.len();
-    let selected_count = candidate_count.saturating_sub(omitted);
-    let retrieval_method_owned = retrieval_method.to_string();
-    let _ = call_blocking(db.clone(), move |d| {
-        d.log_memory_injection(
-            chat_id,
-            &retrieval_method_owned,
-            candidate_count,
-            selected_count,
-            omitted,
-            used_tokens,
-        )
-        .map(|_| ())
-    })
-    .await;
-    info!(
-        "Memory injection: chat {} -> {} memories, method={}, tokens_est={}, omitted={}",
-        chat_id, selected_count, retrieval_method, used_tokens, omitted
-    );
-    out
 }
 
 /// Load the SOUL.md content for personality customization.
@@ -2709,7 +2400,7 @@ mod tests {
             .unwrap();
 
         let memory_backend = Arc::new(crate::memory_backend::MemoryBackend::local_only(db.clone()));
-        let context = build_db_memory_context(&memory_backend, &db, &None, 100, "short", 20).await;
+        let context = build_db_memory_context(&memory_backend, &db, None, 100, "short", 20).await;
         assert!(context.contains("<structured_memories>"));
         assert!(context.contains("(+"));
         assert!(context.contains("memories omitted"));
@@ -2728,7 +2419,7 @@ mod tests {
 
         let memory_backend = Arc::new(crate::memory_backend::MemoryBackend::local_only(db.clone()));
         let context =
-            build_db_memory_context(&memory_backend, &db, &None, 100, "likes", 10_000).await;
+            build_db_memory_context(&memory_backend, &db, None, 100, "likes", 10_000).await;
         assert!(context.contains("user likes rust"));
         assert!(context.contains("user likes coffee"));
         assert!(!context.contains("memories omitted"));
@@ -2746,7 +2437,7 @@ mod tests {
 
         let memory_backend = Arc::new(crate::memory_backend::MemoryBackend::local_only(db.clone()));
         let context =
-            build_db_memory_context(&memory_backend, &db, &None, 100, "喜欢 咖啡", 10_000).await;
+            build_db_memory_context(&memory_backend, &db, None, 100, "喜欢 咖啡", 10_000).await;
         let first_line = context
             .lines()
             .find(|line| line.starts_with('['))
@@ -2821,7 +2512,7 @@ mod tests {
             let recalled = build_db_memory_context(
                 &restarted.memory_backend,
                 &restarted.db,
-                &None,
+                None,
                 chat_id,
                 "database port",
                 1500,

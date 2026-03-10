@@ -7,8 +7,8 @@ use tracing::{error, info, warn};
 
 use crate::agent_engine::process_with_agent;
 use crate::agent_engine::AgentRequestContext;
+use crate::memory_service::apply_reflector_extractions;
 use crate::runtime::AppState;
-use crate::{db::Memory, memory_quality};
 use microclaw_channels::channel::{
     deliver_and_store_bot_message, get_chat_routing, ChatRouting, ConversationKind,
 };
@@ -245,87 +245,6 @@ CRITICAL — how to memorize bugs and problems:
   GOOD: "TODO: strictly follow TOOLS.md rules for every tool call"
 - The memory should tell the agent HOW TO BEHAVE CORRECTLY, never describe the broken behavior."#;
 
-fn jaccard_similar(a: &str, b: &str, threshold: f64) -> bool {
-    use std::collections::HashSet;
-    let a_words: HashSet<&str> = a.split_whitespace().collect();
-    let b_words: HashSet<&str> = b.split_whitespace().collect();
-    let intersection = a_words.intersection(&b_words).count();
-    let union = a_words.len() + b_words.len() - intersection;
-    if union == 0 {
-        return true;
-    }
-    intersection as f64 / union as f64 >= threshold
-}
-
-fn should_merge_duplicate(
-    existing: &Memory,
-    incoming_content: &str,
-    incoming_category: &str,
-) -> bool {
-    if existing.is_archived {
-        return true;
-    }
-    if existing.content.eq_ignore_ascii_case(incoming_content) {
-        return false;
-    }
-    if incoming_category == "PROFILE" && existing.category != "PROFILE" {
-        return true;
-    }
-    incoming_content.len() > existing.content.len() + 8
-}
-
-fn is_corrective_action_item(content: &str) -> bool {
-    let lower = content.to_ascii_lowercase();
-    let trimmed = lower.trim();
-    trimmed.starts_with("todo:")
-        || trimmed.starts_with("todo ")
-        || trimmed.contains(" ensure ")
-        || trimmed.starts_with("ensure ")
-}
-
-fn looks_like_broken_behavior_fact(content: &str) -> bool {
-    let lower = content.to_ascii_lowercase();
-    let broken_cues = [
-        "tool calls were broken",
-        "typed tool calls as text",
-        "posted as text",
-        "authentication error",
-        "auth fails",
-        "not following instructions",
-        "isn't following instructions",
-        "failed",
-        "broke ",
-        "was broken",
-        "error on",
-    ];
-    broken_cues.iter().any(|cue| lower.contains(cue))
-}
-
-fn should_skip_memory_poisoning_risk(content: &str) -> bool {
-    looks_like_broken_behavior_fact(content) && !is_corrective_action_item(content)
-}
-
-#[cfg(feature = "sqlite-vec")]
-async fn upsert_memory_embedding(
-    state: &Arc<AppState>,
-    memory_id: i64,
-    content: &str,
-) -> Result<(), ()> {
-    let provider = match &state.embedding {
-        Some(p) => p,
-        None => return Ok(()),
-    };
-    let model_name = provider.model().to_string();
-    let embedding = provider.embed(content).await.map_err(|_| ())?;
-    call_blocking(state.db.clone(), move |db| {
-        db.upsert_memory_vec(memory_id, &embedding)?;
-        db.update_memory_embedding_model(memory_id, &model_name)?;
-        Ok(())
-    })
-    .await
-    .map_err(|_| ())
-}
-
 #[cfg(feature = "sqlite-vec")]
 async fn backfill_embeddings(state: &Arc<AppState>) {
     if state.embedding.is_none() {
@@ -340,7 +259,7 @@ async fn backfill_embeddings(state: &Arc<AppState>) {
         Err(_) => return,
     };
     for mem in pending {
-        let _ = upsert_memory_embedding(state, mem.id, &mem.content).await;
+        let _ = crate::memory_service::upsert_memory_embedding(state, mem.id, &mem.content).await;
     }
 }
 
@@ -626,196 +545,11 @@ async fn reflect_for_chat(state: &Arc<AppState>, chat_id: i64) {
     }
 
     // 8. Insert new memories or update superseded ones
-    let mut inserted = 0usize;
-    let mut updated = 0usize;
-    let mut skipped = 0usize;
-    #[cfg(feature = "sqlite-vec")]
-    let dedup_method = if state.embedding.is_some() {
-        "semantic"
-    } else {
-        "jaccard"
-    };
-    #[cfg(not(feature = "sqlite-vec"))]
-    let dedup_method = "jaccard";
-    let mut seen_contents: Vec<(i64, String)> =
-        existing.iter().map(|m| (m.id, m.content.clone())).collect();
-    let existing_by_id: std::collections::HashMap<i64, &Memory> =
-        existing.iter().map(|m| (m.id, m)).collect();
-    let mut topic_latest: std::collections::HashMap<String, i64> = existing
-        .iter()
-        .filter(|m| !m.is_archived)
-        .map(|m| (memory_quality::memory_topic_key(&m.content), m.id))
-        .collect();
-    for item in &extracted {
-        let content = match item.get("content").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => continue,
-        };
-        let category = item
-            .get("category")
-            .and_then(|v| v.as_str())
-            .unwrap_or("KNOWLEDGE")
-            .to_ascii_uppercase();
-        if !matches!(category.as_str(), "PROFILE" | "KNOWLEDGE" | "EVENT") {
-            continue;
-        }
-        let content = match memory_quality::normalize_memory_content(content, 180) {
-            Some(c) => c,
-            None => continue,
-        };
-        if should_skip_memory_poisoning_risk(&content) {
-            skipped += 1;
-            continue;
-        }
-        if !memory_quality::memory_quality_ok(&content) {
-            continue;
-        }
-
-        // If the LLM flagged an existing memory to supersede, update it
-        let supersedes_id = item.get("supersedes_id").and_then(|v| v.as_i64());
-        if let Some(sid) = supersedes_id {
-            if existing.iter().any(|m| m.id == sid) {
-                let content = content.to_string();
-                let category = category.to_string();
-                let db_content = content.clone();
-                if state
-                    .memory_backend
-                    .update_memory_with_metadata(sid, &db_content, &category, 0.78, "reflector")
-                    .await
-                    .is_ok()
-                {
-                    updated += 1;
-                    #[cfg(feature = "sqlite-vec")]
-                    {
-                        let _ = upsert_memory_embedding(state, sid, &content).await;
-                    }
-                    seen_contents.push((sid, content));
-                }
-                continue;
-            }
-        }
-
-        let topic_key = memory_quality::memory_topic_key(&content);
-        if let Some(prev_id) = topic_latest.get(&topic_key).copied() {
-            if let Some(prev) = existing_by_id.get(&prev_id) {
-                if !prev.content.eq_ignore_ascii_case(&content)
-                    && !jaccard_similar(&prev.content, &content, 0.85)
-                {
-                    let new_content = content.to_string();
-                    let new_category = category.to_string();
-                    if let Ok(new_id) = state
-                        .memory_backend
-                        .supersede_memory(
-                            prev_id,
-                            &new_content,
-                            &new_category,
-                            "reflector_conflict",
-                            0.74,
-                            Some("topic_conflict"),
-                        )
-                        .await
-                    {
-                        updated += 1;
-                        #[cfg(feature = "sqlite-vec")]
-                        {
-                            let _ = upsert_memory_embedding(state, new_id, &content).await;
-                        }
-                        topic_latest.insert(topic_key, new_id);
-                        seen_contents.push((new_id, content));
-                        continue;
-                    }
-                }
-            }
-        }
-
-        // Dedup: semantic KNN when available, otherwise lexical Jaccard.
-        let duplicate_id = {
-            #[cfg(feature = "sqlite-vec")]
-            {
-                if let Some(provider) = &state.embedding {
-                    if let Ok(query_vec) = provider.embed(&content).await {
-                        let nearest = call_blocking(state.db.clone(), move |db| {
-                            db.knn_memories(chat_id, &query_vec, 1)
-                        })
-                        .await
-                        .ok()
-                        .and_then(|rows| rows.first().copied());
-                        nearest.and_then(|(id, dist)| if dist < 0.15 { Some(id) } else { None })
-                    } else {
-                        seen_contents
-                            .iter()
-                            .find(|(_, existing)| jaccard_similar(existing, &content, 0.5))
-                            .map(|(id, _)| *id)
-                    }
-                } else {
-                    seen_contents
-                        .iter()
-                        .find(|(_, existing)| jaccard_similar(existing, &content, 0.5))
-                        .map(|(id, _)| *id)
-                }
-            }
-            #[cfg(not(feature = "sqlite-vec"))]
-            {
-                seen_contents
-                    .iter()
-                    .find(|(_, existing)| jaccard_similar(existing, &content, 0.5))
-                    .map(|(id, _)| *id)
-            }
-        };
-        if let Some(dup_id) = duplicate_id {
-            if let Some(existing_mem) = existing_by_id.get(&dup_id) {
-                if should_merge_duplicate(existing_mem, &content, &category) {
-                    let update_content = content.to_string();
-                    let update_category = category.to_string();
-                    if state
-                        .memory_backend
-                        .update_memory_with_metadata(
-                            dup_id,
-                            &update_content,
-                            &update_category,
-                            0.70,
-                            "reflector",
-                        )
-                        .await
-                        .is_ok()
-                    {
-                        updated += 1;
-                    } else {
-                        skipped += 1;
-                    }
-                } else {
-                    let _ = state
-                        .memory_backend
-                        .touch_memory_last_seen(dup_id, Some(0.55))
-                        .await;
-                    skipped += 1;
-                }
-            } else {
-                skipped += 1;
-            }
-            continue;
-        }
-
-        let content = content.to_string();
-        let db_content = content.clone();
-        let category = category.to_string();
-        let inserted_id = state
-            .memory_backend
-            .insert_memory_with_metadata(Some(chat_id), &db_content, &category, "reflector", 0.68)
-            .await
-            .ok();
-        if let Some(memory_id) = inserted_id {
-            inserted += 1;
-            #[cfg(feature = "sqlite-vec")]
-            {
-                let _ = upsert_memory_embedding(state, memory_id, &content).await;
-            }
-            #[cfg(not(feature = "sqlite-vec"))]
-            let _ = memory_id;
-            seen_contents.push((memory_id, content));
-            topic_latest.insert(topic_key, memory_id);
-        }
-    }
+    let outcome = apply_reflector_extractions(state, chat_id, &existing, &extracted).await;
+    let inserted = outcome.inserted;
+    let updated = outcome.updated;
+    let skipped = outcome.skipped;
+    let dedup_method = outcome.dedup_method;
 
     if let Some(ts) = latest_message_ts {
         let _ = call_blocking(state.db.clone(), move |db| {
@@ -855,28 +589,40 @@ mod tests {
 
     #[test]
     fn test_jaccard_similar_identical() {
-        assert!(jaccard_similar("hello world", "hello world", 0.5));
+        assert!(crate::memory_service::jaccard_similar(
+            "hello world",
+            "hello world",
+            0.5,
+        ));
     }
 
     #[test]
     fn test_jaccard_similar_no_overlap() {
-        assert!(!jaccard_similar("hello world", "foo bar", 0.5));
+        assert!(!crate::memory_service::jaccard_similar(
+            "hello world",
+            "foo bar",
+            0.5,
+        ));
     }
 
     #[test]
     fn test_jaccard_similar_partial_overlap() {
         // "a b c" vs "a b d" => intersection=2, union=4 => 0.5 >= 0.5
-        assert!(jaccard_similar("a b c", "a b d", 0.5));
+        assert!(crate::memory_service::jaccard_similar(
+            "a b c", "a b d", 0.5,
+        ));
         // "a b c" vs "a d e" => intersection=1, union=5 => 0.2 < 0.5
-        assert!(!jaccard_similar("a b c", "a d e", 0.5));
+        assert!(!crate::memory_service::jaccard_similar(
+            "a b c", "a d e", 0.5,
+        ));
     }
 
     #[test]
     fn test_jaccard_similar_empty_strings() {
         // Both empty => union=0 => returns true
-        assert!(jaccard_similar("", "", 0.5));
+        assert!(crate::memory_service::jaccard_similar("", "", 0.5));
         // One empty => intersection=0, union=1 => 0.0 < 0.5
-        assert!(!jaccard_similar("hello", "", 0.5));
+        assert!(!crate::memory_service::jaccard_similar("hello", "", 0.5));
     }
 
     #[test]
@@ -888,20 +634,20 @@ mod tests {
 
     #[test]
     fn test_should_skip_memory_poisoning_risk_for_broken_behavior_fact() {
-        assert!(should_skip_memory_poisoning_risk(
+        assert!(crate::memory_service::should_skip_memory_poisoning_risk(
             "proactive-agent skill broke tool calling; tool calls posted as text"
         ));
-        assert!(should_skip_memory_poisoning_risk(
+        assert!(crate::memory_service::should_skip_memory_poisoning_risk(
             "got 401 authentication error on Discord"
         ));
     }
 
     #[test]
     fn test_should_not_skip_memory_poisoning_risk_for_action_items() {
-        assert!(!should_skip_memory_poisoning_risk(
+        assert!(!crate::memory_service::should_skip_memory_poisoning_risk(
             "TODO: ensure tool calls always execute via tool system"
         ));
-        assert!(!should_skip_memory_poisoning_risk(
+        assert!(!crate::memory_service::should_skip_memory_poisoning_risk(
             "Ensure TOOLS.md rules are followed for every tool call"
         ));
     }
