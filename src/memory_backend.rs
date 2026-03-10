@@ -81,8 +81,13 @@ impl MemoryBackend {
         }
     }
 
-    pub fn prefers_mcp(&self) -> bool {
-        self.provider.prefers_mcp()
+    #[cfg(test)]
+    pub(crate) fn from_provider(provider: Arc<dyn MemoryProvider>) -> Self {
+        Self { provider }
+    }
+
+    pub fn supports_local_semantic_ranking(&self) -> bool {
+        self.provider.supports_local_semantic_ranking()
     }
 
     pub async fn get_all_memories_for_chat(
@@ -191,8 +196,8 @@ impl MemoryBackend {
 
 #[async_trait]
 pub trait MemoryProvider: Send + Sync {
-    fn prefers_mcp(&self) -> bool {
-        false
+    fn supports_local_semantic_ranking(&self) -> bool {
+        true
     }
 
     async fn get_all_memories_for_chat(
@@ -395,8 +400,8 @@ impl McpMemoryProvider {
 
 #[async_trait]
 impl MemoryProvider for McpMemoryProvider {
-    fn prefers_mcp(&self) -> bool {
-        true
+    fn supports_local_semantic_ranking(&self) -> bool {
+        false
     }
 
     async fn get_all_memories_for_chat(
@@ -648,8 +653,8 @@ impl FallbackMemoryProvider {
 
 #[async_trait]
 impl MemoryProvider for FallbackMemoryProvider {
-    fn prefers_mcp(&self) -> bool {
-        self.primary.prefers_mcp()
+    fn supports_local_semantic_ranking(&self) -> bool {
+        self.primary.supports_local_semantic_ranking()
     }
 
     async fn get_all_memories_for_chat(
@@ -914,4 +919,170 @@ fn extract_bool_flag(value: &serde_json::Value) -> Option<bool> {
 #[allow(dead_code)]
 fn _extract_tool_info(tools: &[McpToolInfo]) -> Vec<String> {
     tools.iter().map(|t| t.name.clone()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn sample_memory(id: i64, content: &str) -> Memory {
+        Memory {
+            id,
+            chat_id: Some(42),
+            content: content.to_string(),
+            category: "KNOWLEDGE".to_string(),
+            created_at: "2026-03-10T00:00:00Z".to_string(),
+            updated_at: "2026-03-10T00:00:00Z".to_string(),
+            embedding_model: None,
+            confidence: 0.9,
+            source: "test".to_string(),
+            last_seen_at: "2026-03-10T00:00:00Z".to_string(),
+            is_archived: false,
+            archived_at: None,
+        }
+    }
+
+    struct FakeProvider {
+        supports_local_semantic_ranking: bool,
+        get_context_memories: Vec<Memory>,
+        get_context_error: Option<String>,
+        get_context_calls: AtomicUsize,
+    }
+
+    impl FakeProvider {
+        fn success(memories: Vec<Memory>, supports_local_semantic_ranking: bool) -> Self {
+            Self {
+                supports_local_semantic_ranking,
+                get_context_memories: memories,
+                get_context_error: None,
+                get_context_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn failure(message: &str, supports_local_semantic_ranking: bool) -> Self {
+            Self {
+                supports_local_semantic_ranking,
+                get_context_memories: Vec::new(),
+                get_context_error: Some(message.to_string()),
+                get_context_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MemoryProvider for FakeProvider {
+        fn supports_local_semantic_ranking(&self) -> bool {
+            self.supports_local_semantic_ranking
+        }
+
+        async fn get_all_memories_for_chat(
+            &self,
+            _chat_id: Option<i64>,
+        ) -> Result<Vec<Memory>, MicroClawError> {
+            Ok(vec![sample_memory(1, "all")])
+        }
+
+        async fn get_memories_for_context(
+            &self,
+            _chat_id: i64,
+            _limit: usize,
+        ) -> Result<Vec<Memory>, MicroClawError> {
+            self.get_context_calls.fetch_add(1, Ordering::SeqCst);
+            match &self.get_context_error {
+                Some(message) => Err(MicroClawError::ToolExecution(message.clone())),
+                None => Ok(self.get_context_memories.clone()),
+            }
+        }
+
+        async fn search_memories_with_options(
+            &self,
+            _chat_id: i64,
+            _query: &str,
+            _limit: usize,
+            _include_archived: bool,
+            _broad_recall: bool,
+        ) -> Result<Vec<Memory>, MicroClawError> {
+            Ok(vec![sample_memory(2, "search")])
+        }
+
+        async fn get_memory_by_id(&self, id: i64) -> Result<Option<Memory>, MicroClawError> {
+            Ok(Some(sample_memory(id, "by-id")))
+        }
+
+        async fn insert_memory_with_metadata(
+            &self,
+            _chat_id: Option<i64>,
+            _content: &str,
+            _category: &str,
+            _source: &str,
+            _confidence: f64,
+        ) -> Result<i64, MicroClawError> {
+            Ok(10)
+        }
+
+        async fn update_memory_with_metadata(
+            &self,
+            _id: i64,
+            _content: &str,
+            _category: &str,
+            _confidence: f64,
+            _source: &str,
+        ) -> Result<bool, MicroClawError> {
+            Ok(true)
+        }
+
+        async fn archive_memory(&self, _id: i64) -> Result<bool, MicroClawError> {
+            Ok(true)
+        }
+
+        async fn supersede_memory(
+            &self,
+            _from_memory_id: i64,
+            _new_content: &str,
+            _category: &str,
+            _source: &str,
+            _confidence: f64,
+            _reason: Option<&str>,
+        ) -> Result<i64, MicroClawError> {
+            Ok(11)
+        }
+
+        async fn touch_memory_last_seen(
+            &self,
+            _id: i64,
+            _confidence_floor: Option<f64>,
+        ) -> Result<bool, MicroClawError> {
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_backend_capability_reflects_provider() {
+        let backend = MemoryBackend::from_provider(Arc::new(FakeProvider::success(
+            vec![sample_memory(1, "x")],
+            false,
+        )));
+        assert!(!backend.supports_local_semantic_ranking());
+    }
+
+    #[tokio::test]
+    async fn test_fallback_provider_uses_fallback_on_error() {
+        let primary = Arc::new(FakeProvider::failure("boom", false));
+        let fallback = Arc::new(FakeProvider::success(
+            vec![sample_memory(7, "from fallback")],
+            true,
+        ));
+        let backend = MemoryBackend::from_provider(Arc::new(FallbackMemoryProvider::new(
+            primary.clone(),
+            fallback.clone(),
+        )));
+
+        let memories = backend.get_memories_for_context(42, 10).await.unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].content, "from fallback");
+        assert_eq!(primary.get_context_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fallback.get_context_calls.load(Ordering::SeqCst), 1);
+        assert!(!backend.supports_local_semantic_ranking());
+    }
 }

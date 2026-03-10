@@ -619,5 +619,5 @@ pub(crate) async fn apply_reflector_extractions(
 
 #[cfg(feature = "sqlite-vec")]
 pub(crate) fn memory_supports_local_semantic_ranking(memory_backend: &MemoryBackend) -> bool {
-    !memory_backend.prefers_mcp()
+    memory_backend.supports_local_semantic_ranking()
 }
