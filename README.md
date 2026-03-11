@@ -559,6 +559,7 @@ Endpoints:
 - `POST /api/chat` (alias for chatbot-style clients)
 - `POST /api/send_stream` (async run + SSE replay)
 - `POST /api/chat_stream` (alias for chatbot-style clients)
+- `GET /ws` (OpenClaw Mission Control-compatible WebSocket bridge)
 - `POST /hooks/agent` and `POST /api/hooks/agent` (OpenClaw-style webhook payload compatibility)
 - `POST /hooks/wake` and `POST /api/hooks/wake` (system-event wake trigger: `now` or `next-heartbeat`)
 
@@ -610,6 +611,43 @@ Consume SSE events:
 ```sh
 curl -N "http://127.0.0.1:10961/api/stream?run_id=<RUN_ID>" \
   -H "Authorization: Bearer $MICROCLAW_API_KEY"
+```
+
+Mission Control / OpenClaw-style WebSocket bridge:
+
+1. Connect to `ws://127.0.0.1:10961/ws`
+2. Wait for `connect.challenge`
+3. Send a `connect` frame with your operator API key in `params.auth.token`
+4. Use `chat.send` and consume live `chat` events (`delta` / `final` / `error`)
+
+Example connect frame:
+
+```json
+{
+  "type": "req",
+  "id": "connect-1",
+  "method": "connect",
+  "params": {
+    "minProtocol": 3,
+    "maxProtocol": 3,
+    "auth": { "token": "mc_..." }
+  }
+}
+```
+
+Example chat send frame:
+
+```json
+{
+  "type": "req",
+  "id": "send-1",
+  "method": "chat.send",
+  "params": {
+    "sessionKey": "ops-bot",
+    "message": "Summarize the current repo",
+    "idempotencyKey": "idem-1"
+  }
+}
 ```
 
 Example:
