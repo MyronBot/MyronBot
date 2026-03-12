@@ -4949,6 +4949,14 @@ fn save_config_yaml(
     let backup = create_config_backup(path)?;
 
     let get = |key: &str| values.get(key).cloned().unwrap_or_default();
+    let get_with_fallback = |key: &str, default: &str| {
+        values
+            .get(key)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .unwrap_or(default)
+            .to_string()
+    };
     let data_dir = values
         .get("DATA_DIR")
         .cloned()
@@ -5038,45 +5046,45 @@ fn save_config_yaml(
             .map_err(|e| MicroClawError::Config(format!("{key} must be a positive integer: {e}")))
     };
     let subagents_max_concurrent = parse_usize_or_default(
-        get(subagents_max_concurrent_key()),
+        get_with_fallback(subagents_max_concurrent_key(), "4"),
         subagents_max_concurrent_key(),
         4,
     )?;
     let subagents_max_active_per_chat = parse_usize_or_default(
-        get(subagents_max_active_per_chat_key()),
+        get_with_fallback(subagents_max_active_per_chat_key(), "5"),
         subagents_max_active_per_chat_key(),
         5,
     )?;
     let subagents_run_timeout_secs = parse_u64_or_default(
-        get(subagents_run_timeout_secs_key()),
+        get_with_fallback(subagents_run_timeout_secs_key(), "900"),
         subagents_run_timeout_secs_key(),
         900,
     )?;
     let subagents_announce_to_chat = parse_boolish(&get(subagents_announce_to_chat_key()), true)?;
     let subagents_max_spawn_depth = parse_usize_or_default(
-        get(subagents_max_spawn_depth_key()),
+        get_with_fallback(subagents_max_spawn_depth_key(), "1"),
         subagents_max_spawn_depth_key(),
         1,
     )?;
     let subagents_max_children_per_run = parse_usize_or_default(
-        get(subagents_max_children_per_run_key()),
+        get_with_fallback(subagents_max_children_per_run_key(), "5"),
         subagents_max_children_per_run_key(),
         5,
     )?;
     let subagents_thread_bound_routing_enabled =
         parse_boolish(&get(subagents_thread_bound_routing_enabled_key()), true)?;
     let subagents_announce_relay_interval_secs = parse_u64_or_default(
-        get(subagents_announce_relay_interval_secs_key()),
+        get_with_fallback(subagents_announce_relay_interval_secs_key(), "15"),
         subagents_announce_relay_interval_secs_key(),
         15,
     )?;
     let subagents_max_tokens_per_run = parse_i64_or_default(
-        get(subagents_max_tokens_per_run_key()),
+        get_with_fallback(subagents_max_tokens_per_run_key(), "400000"),
         subagents_max_tokens_per_run_key(),
         400_000,
     )?;
     let subagents_orchestrate_max_workers = parse_usize_or_default(
-        get(subagents_orchestrate_max_workers_key()),
+        get_with_fallback(subagents_orchestrate_max_workers_key(), "5"),
         subagents_orchestrate_max_workers_key(),
         5,
     )?;

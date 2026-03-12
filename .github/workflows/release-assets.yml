@@ -32,33 +32,92 @@ jobs:
       - name: Ensure CI succeeded for tag commit
         env:
           GH_TOKEN: ${{ github.token }}
+          CI_WAIT_TIMEOUT_SECONDS: "900"
+          CI_WAIT_INTERVAL_SECONDS: "30"
+          REQUIRED_CI_JOBS_JSON: '["Web Build","Rust (ubuntu-latest)","Rust (macos-latest)","Stability Smoke"]'
         shell: bash
         run: |
           TARGET_SHA="$(git rev-parse HEAD)"
           echo "Checking CI status for commit: ${TARGET_SHA}"
+          elapsed=0
+          timeout_seconds="${CI_WAIT_TIMEOUT_SECONDS}"
+          interval_seconds="${CI_WAIT_INTERVAL_SECONDS}"
 
-          SUCCESS_RUN_ID="$(
-            gh run list \
-              --repo "${GITHUB_REPOSITORY}" \
-              --workflow "CI" \
-              --commit "${TARGET_SHA}" \
-              --json databaseId,conclusion,status \
-              --jq '[.[] | select(.conclusion == "success")] | first | .databaseId'
-          )"
+          while [[ "${elapsed}" -lt "${timeout_seconds}" ]]; do
+            RUN_ID="$(
+              gh run list \
+                --repo "${GITHUB_REPOSITORY}" \
+                --workflow "CI" \
+                --commit "${TARGET_SHA}" \
+                --json databaseId,createdAt \
+                --jq 'sort_by(.createdAt) | reverse | .[0].databaseId'
+            )"
 
-          if [[ -z "${SUCCESS_RUN_ID}" || "${SUCCESS_RUN_ID}" == "null" ]]; then
-            echo "No successful CI run found for commit ${TARGET_SHA}."
-            echo "Recent CI runs for this commit:"
-            gh run list \
-              --repo "${GITHUB_REPOSITORY}" \
-              --workflow "CI" \
-              --commit "${TARGET_SHA}" \
-              --json databaseId,status,conclusion,url \
-              --jq '.[] | {id: .databaseId, status: .status, conclusion: .conclusion, url: .url}'
-            exit 1
-          fi
+            if [[ -z "${RUN_ID}" || "${RUN_ID}" == "null" ]]; then
+              echo "CI run not found yet for commit ${TARGET_SHA}."
+            else
+              JOBS_JSON="$(
+                gh run view "${RUN_ID}" \
+                  --repo "${GITHUB_REPOSITORY}" \
+                  --json jobs
+              )"
 
-          echo "Found successful CI run id: ${SUCCESS_RUN_ID}"
+              FAILED_JOB="$(
+                jq -r --argjson required "${REQUIRED_CI_JOBS_JSON}" '
+                  .jobs
+                  | map(select(.name as $name | $required | index($name)))
+                  | map(select(
+                      .conclusion == "failure"
+                      or .conclusion == "cancelled"
+                      or .conclusion == "timed_out"
+                      or .conclusion == "action_required"
+                      or .conclusion == "startup_failure"
+                      or .conclusion == "stale"
+                    ))
+                  | first
+                  | if . == null then empty else "\(.name) \(.url)" end
+                ' <<<"${JOBS_JSON}"
+              )"
+
+              if [[ -n "${FAILED_JOB}" ]]; then
+                echo "Required CI job failed for commit ${TARGET_SHA}: ${FAILED_JOB}" >&2
+                exit 1
+              fi
+
+              COMPLETED_REQUIRED_COUNT="$(
+                jq -r --argjson required "${REQUIRED_CI_JOBS_JSON}" '
+                  .jobs
+                  | map(select(.name as $name | $required | index($name)))
+                  | map(select(.conclusion == "success"))
+                  | length
+                ' <<<"${JOBS_JSON}"
+              )"
+
+              REQUIRED_COUNT="$(
+                jq -r 'length' <<<"${REQUIRED_CI_JOBS_JSON}"
+              )"
+
+              if [[ "${COMPLETED_REQUIRED_COUNT}" -eq "${REQUIRED_COUNT}" ]]; then
+                echo "Required CI jobs succeeded. Run id: ${RUN_ID}"
+                exit 0
+              fi
+
+              echo "Waiting for required CI jobs (${COMPLETED_REQUIRED_COUNT}/${REQUIRED_COUNT}) on run ${RUN_ID}."
+            fi
+
+            sleep "${interval_seconds}"
+            elapsed=$((elapsed + interval_seconds))
+          done
+
+          echo "Timed out waiting for required CI jobs after ${timeout_seconds}s." >&2
+          echo "Recent CI runs for this commit:"
+          gh run list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --workflow "CI" \
+            --commit "${TARGET_SHA}" \
+            --json databaseId,status,conclusion,url \
+            --jq '.[] | {id: .databaseId, status: .status, conclusion: .conclusion, url: .url}'
+          exit 1
 
   build-assets:
     name: Build ${{ matrix.label }}

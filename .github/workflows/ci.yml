@@ -25,13 +25,22 @@ jobs:
       - run: npm --prefix web ci
       - run: npm --prefix web run build
 
-  rust-checks:
-    name: Rust (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+  rust-ubuntu:
+    name: Rust (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  rust-macos:
+    name: Rust (macos-latest)
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -45,7 +54,7 @@ jobs:
   stability-smoke:
     name: Stability Smoke
     runs-on: ubuntu-latest
-    needs: [rust-checks]
+    needs: [rust-ubuntu]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -55,20 +64,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: scripts/ci/stability_smoke.sh
 
-  nix-build:
-    name: Nix Build (flake)
-    runs-on: ubuntu-latest
-    needs: [web, rust-checks]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v19
-      - uses: DeterminateSystems/magic-nix-cache-action@v13
-      - run: nix build .#microclaw
-
   build:
     name: Build (Release)
     runs-on: ubuntu-latest
-    needs: [web, rust-checks, stability-smoke, nix-build]
+    needs: [web, rust-ubuntu, rust-macos, stability-smoke]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

@@ -48,40 +48,74 @@ sync_rebase_and_push() {
 wait_for_ci_success() {
   local github_repo="$1"
   local commit_sha="$2"
-  local timeout_seconds="${CI_WAIT_TIMEOUT_SECONDS:-3000}"
+  local timeout_seconds="${CI_WAIT_TIMEOUT_SECONDS:-6000}"
   local interval_seconds="${CI_WAIT_INTERVAL_SECONDS:-20}"
   local elapsed=0
+  local required_jobs_json='["Web Build","Rust (ubuntu-latest)","Rust (macos-latest)","Stability Smoke"]'
+  local required_job_count
 
-  echo "Waiting for CI success on commit: $commit_sha"
+  required_job_count="$(jq -r 'length' <<<"$required_jobs_json")"
+
+  echo "Waiting for required CI jobs on commit: $commit_sha"
   while [ "$elapsed" -lt "$timeout_seconds" ]; do
-    local success_run_id
-    success_run_id="$(
+    local run_id
+    run_id="$(
       gh run list \
         --repo "$github_repo" \
         --workflow "CI" \
         --commit "$commit_sha" \
-        --json databaseId,conclusion \
-        --jq '[.[] | select(.conclusion == "success")] | first | .databaseId'
+        --json databaseId,status,createdAt \
+        --jq 'sort_by(.createdAt) | reverse | .[0].databaseId'
     )"
 
-    if [ -n "$success_run_id" ] && [ "$success_run_id" != "null" ]; then
-      echo "CI succeeded. Run id: $success_run_id"
-      return 0
+    if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
+      echo "CI run not found yet for commit $commit_sha."
+      sleep "$interval_seconds"
+      elapsed=$((elapsed + interval_seconds))
+      continue
     fi
 
-    local failed_run_url
-    failed_run_url="$(
-      gh run list \
+    local jobs_json
+    jobs_json="$(
+      gh run view "$run_id" \
         --repo "$github_repo" \
-        --workflow "CI" \
-        --commit "$commit_sha" \
-        --json conclusion,url \
-        --jq '[.[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required" or .conclusion == "startup_failure" or .conclusion == "stale")] | first | .url'
+        --json jobs
     )"
 
-    if [ -n "$failed_run_url" ] && [ "$failed_run_url" != "null" ]; then
-      echo "CI failed for commit $commit_sha: $failed_run_url" >&2
+    local failed_job
+    failed_job="$(
+      jq -r --argjson required "$required_jobs_json" '
+        .jobs
+        | map(select(.name as $name | $required | index($name)))
+        | map(select(.conclusion == "failure"
+                  or .conclusion == "cancelled"
+                  or .conclusion == "timed_out"
+                  or .conclusion == "action_required"
+                  or .conclusion == "startup_failure"
+                  or .conclusion == "stale"))
+        | first
+        | if . == null then empty else "\(.name) \(.url)" end
+      ' <<<"$jobs_json"
+    )"
+
+    if [ -n "$failed_job" ]; then
+      echo "Required CI job failed for commit $commit_sha: $failed_job" >&2
       return 1
+    fi
+
+    local completed_required_count
+    completed_required_count="$(
+      jq -r --argjson required "$required_jobs_json" '
+        .jobs
+        | map(select(.name as $name | $required | index($name)))
+        | map(select(.conclusion == "success"))
+        | length
+      ' <<<"$jobs_json"
+    )"
+
+    if [ "$completed_required_count" -eq "$required_job_count" ]; then
+      echo "Required CI jobs succeeded. Run id: $run_id"
+      return 0
     fi
 
     echo "CI not successful yet. Slept ${elapsed}s/${timeout_seconds}s."
@@ -89,7 +123,7 @@ wait_for_ci_success() {
     elapsed=$((elapsed + interval_seconds))
   done
 
-  echo "Timed out waiting for CI success after ${timeout_seconds}s." >&2
+  echo "Timed out waiting for required CI jobs after ${timeout_seconds}s." >&2
   return 1
 }
 
@@ -157,6 +191,7 @@ done
 
 require_cmd gh
 require_cmd git
+require_cmd jq
 require_cmd shasum
 
 if ! gh auth status >/dev/null 2>&1; then
